@@ -16,7 +16,16 @@ from model import fit_strengths
 from aggregate import aggregate, subcategory_confidence
 from score import to_ten_point, perfect_candidates
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 POSTER_BASE = "https://image.tmdb.org/t/p/w500"
 
