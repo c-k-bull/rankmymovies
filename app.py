@@ -12,9 +12,71 @@ from pool import build_pool
 from fastapi import Body
 from compare import select_pair
 
+from model import fit_strengths
+from aggregate import aggregate, subcategory_confidence
+from score import to_ten_point, perfect_candidates
+
 app = FastAPI()
 
 POSTER_BASE = "https://image.tmdb.org/t/p/w500"
+
+SUBCATEGORIES = [
+    ("directors", False, 2),
+    ("genres", True, 4),
+    ("cast", False, 3),
+]
+
+
+@app.get("/results/{sid}")
+async def get_results(sid: str):
+    films = load_session_films(sid)
+    log = load_session_log(sid)
+
+    if len(log) < 10:
+        return {"ready": False, "count": len(log), "needed": 10 - len(log)}
+
+    excluded = set()
+    ex_path = storage.session_path(sid, "exclusions.csv")
+    if ex_path.exists():
+        excluded = set(pd.read_csv(ex_path)["film_uri"])
+
+    pool = films[films["in_pool"] & ~films["film_uri"].isin(excluded)].copy()
+
+    fit = fit_strengths(pool, log)
+    ranked = pool.merge(fit, on="film_uri").sort_values("strength", ascending=False)
+    ranked = to_ten_point(ranked)
+
+    top = [
+        {**film_payload(r), "score": float(r["score_10"]),
+         "provisional": bool(r["provisional"]),
+         "n_comparisons": int(r["n_comparisons"])}
+        for _, r in ranked.head(25).iterrows()
+    ]
+
+    subcats = {}
+    for field, idf, minf in SUBCATEGORIES:
+        agg = aggregate(ranked, field, use_idf=idf, min_films=minf)
+        conf = subcategory_confidence(ranked, agg, field)
+        subcats[field] = {
+            "unlocked": conf["unlocked"],
+            "leaders": conf["leaders"],
+            "more_needed": conf["more_needed"],
+            "entries": [
+                {"name": r["key"], "score": float(r["score"]),
+                 "n_films": int(r["n_films"]), "top_film": r["top_film"]}
+                for _, r in agg.head(8).iterrows()
+            ] if conf["unlocked"] else [],
+        }
+
+    cands = perfect_candidates(ranked)
+
+    return {
+        "ready": True,
+        "count": len(log),
+        "top_films": top,
+        "subcategories": subcats,
+        "perfect_candidates": [film_payload(r) for _, r in cands.iterrows()],
+    }
 
 
 def load_session_films(sid: str) -> pd.DataFrame:
