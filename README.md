@@ -2,7 +2,7 @@
 
 **[rankmymovies.vercel.app](https://rankmymovies.vercel.app)**
 
-Upload your Letterboxd export, answer a few head-to-heads, and get a ranking built from what you chose instead of what you rated.
+Upload a Letterboxd export, answer head-to-heads, and get a ranking built from your choices instead of your previous ratings.
 <img width="570" height="496" alt="Screenshot 2026-09-11 at 3 08 17 PM" src="https://github.com/user-attachments/assets/63e0b302-13c0-49e6-afdd-d17d3283cbf0" />
 
 ---
