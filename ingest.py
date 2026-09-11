@@ -35,9 +35,9 @@ def add_signal_flags(films: pd.DataFrame, export_dir: str) -> pd.DataFrame:
     likes = pd.read_csv(d / "likes" / "films.csv")
     films["is_liked"] = films["film_uri"].isin(likes["Letterboxd URI"])
 
-    profile = pd.read_csv(d / "profile.csv")
-    fav_field = profile["Favorite Films"].iloc[0]
-    fav_uris = [u.strip() for u in fav_field.split(",")]
+    fav_path = d / "favorites.txt"
+    fav_field = fav_path.read_text().strip() if fav_path.exists() else ""
+    fav_uris = [u.strip() for u in fav_field.split(",") if u.strip()]
     films["is_favorite"] = films["film_uri"].isin(fav_uris)
 
     return films
