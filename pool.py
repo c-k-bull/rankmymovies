@@ -4,6 +4,7 @@ POOL_FLOOR = 60
 POOL_CEILING = 175
 POOL_FRACTION = 0.4
 UNRATED_CAP = 15
+UNRATED_CEILING = 50
 SEED = 7
 
 
@@ -20,12 +21,19 @@ def build_pool(films: pd.DataFrame) -> pd.DataFrame:
 
     picked = eligible[forced].copy()
 
-    unrated_slots = min(UNRATED_CAP, target - len(picked))
+    n_rated_available = (eligible["rating"].notna() & ~forced).sum()
+    shortfall = target - len(picked) - n_rated_available
+    unrated_slots = min(
+        max(UNRATED_CAP, shortfall),
+        UNRATED_CEILING,
+        target - len(picked),
+        int(plain_unrated.sum()),
+    )
+
     if unrated_slots > 0:
         picked = pd.concat([
             picked,
-            eligible[plain_unrated].sample(n=min(unrated_slots, plain_unrated.sum()),
-                                           random_state=SEED),
+            eligible[plain_unrated].sample(n=unrated_slots, random_state=SEED),
         ])
 
     remaining = target - len(picked)
