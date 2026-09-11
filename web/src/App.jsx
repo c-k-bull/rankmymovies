@@ -1,51 +1,69 @@
 import { useEffect, useState, useCallback } from "react";
-import Results from "./Results";
-
 import { API } from "./api";
-
 import Landing from "./Landing";
 import Waiting from "./Waiting";
+import Results from "./Results";
 
 const KEY = "rmm.session";
+const QUEUE_TARGET = 3;
 
 export default function App() {
   const [sid, setSid] = useState(() => localStorage.getItem(KEY));
   const [ready, setReady] = useState(false);
-  const [pair, setPair] = useState(null);
-  const [next, setNext] = useState(null);
-  const [view, setView] = useState("compare");
+  const [queue, setQueue] = useState([]);
   const [count, setCount] = useState(0);
+  const [loaded, setLoaded] = useState(false);
+  const [view, setView] = useState("compare");
 
   const fetchPair = useCallback(async () => {
     const r = await fetch(`${API}/pair/${sid}`);
     return r.json();
   }, [sid]);
 
-  useEffect(() => {
-    if (!sid || !ready) return;
-    fetchPair().then((first) => {
-      setPair(first);
-      setCount(first.count);
-      fetchPair().then(setNext);
+  const topUp = useCallback(() => {
+    setQueue((q) => {
+      if (q.length >= QUEUE_TARGET) return q;
+      for (let i = 0; i < QUEUE_TARGET - q.length; i++) {
+        fetchPair().then((p) => {
+          setQueue((cur) => {
+            if (p.done) return cur;
+            const key = p.a.film_uri + p.b.film_uri;
+            const dupe = cur.some((x) => x.a.film_uri + x.b.film_uri === key);
+            return dupe || cur.length >= QUEUE_TARGET ? cur : [...cur, p];
+          });
+        });
+      }
+      return q;
     });
-  }, [fetchPair, sid, ready]);
+  }, [fetchPair]);
 
   useEffect(() => {
-    if (!next || next.done) return;
-    [next.a, next.b].forEach((f) => {
-      if (f.poster) new Image().src = f.poster;
+    if (!sid || !ready || loaded) return;
+    setLoaded(true);
+    fetchPair().then((first) => {
+      setCount(first.count);
+      if (!first.done) setQueue([first]);
+      topUp();
     });
-  }, [next]);
+  }, [sid, ready, loaded, fetchPair, topUp]);
+
+  const pair = queue[0] || null;
+
+  useEffect(() => {
+    queue.slice(1).forEach((p) => {
+      [p.a, p.b].forEach((f) => {
+        if (f.poster) new Image().src = f.poster;
+      });
+    });
+  }, [queue]);
 
   function advance() {
-    setPair(next);
-    setNext(null);
-    fetchPair().then(setNext);
+    setQueue((q) => q.slice(1));
+    topUp();
   }
 
   function choose(winner) {
-    if (!pair || pair.done) return;
-
+    if (!pair) return;
     fetch(`${API}/comparison/${sid}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -55,31 +73,28 @@ export default function App() {
         winner,
       }),
     });
-
     setCount((c) => c + 1);
     advance();
   }
 
   function skip() {
-    if (!pair || pair.done) return;
+    if (!pair) return;
     advance();
   }
 
   function exclude(film_uri) {
-    if (!pair || pair.done) return;
-
+    if (!pair) return;
     fetch(`${API}/exclude/${sid}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ film_uri }),
     });
-
     advance();
   }
 
   useEffect(() => {
     function onKey(e) {
-      if (!pair || pair.done) return;
+      if (!pair) return;
       if (e.key === "ArrowLeft") choose(pair.a.film_uri);
       if (e.key === "ArrowRight") choose(pair.b.film_uri);
       if (e.key === "s") skip();
@@ -88,10 +103,15 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  if (view === "results") return <Results sid={sid} onBack={() => setView("compare")} />;
-
-    if (!sid) {
-    return <Landing onSession={(id) => { localStorage.setItem(KEY, id); setSid(id); }} />;
+  if (!sid) {
+    return (
+      <Landing
+        onSession={(id) => {
+          localStorage.setItem(KEY, id);
+          setSid(id);
+        }}
+      />
+    );
   }
 
   if (!ready) {
@@ -99,13 +119,19 @@ export default function App() {
       <Waiting
         sid={sid}
         onReady={() => setReady(true)}
-        onReset={() => { localStorage.removeItem(KEY); setSid(null); }}
+        onReset={() => {
+          localStorage.removeItem(KEY);
+          setSid(null);
+        }}
       />
     );
   }
 
+  if (view === "results") {
+    return <Results sid={sid} onBack={() => setView("compare")} />;
+  }
+
   if (!pair) return <div className="stage">Loading your films…</div>;
-  if (pair.done) return <div className="stage">You've compared everything.</div>;
 
   return (
     <div className="stage">
