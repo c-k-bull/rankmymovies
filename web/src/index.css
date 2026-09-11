@@ -31,9 +31,14 @@ body {
   justify-content: center;
 }
 
-.poster {
+.slot {
   flex: 1;
   max-width: 220px;
+  display: flex;
+  flex-direction: column;
+}
+
+.poster {
   display: flex;
   flex-direction: column;
   background: none;
@@ -74,13 +79,40 @@ body {
   color: var(--faint);
 }
 
+.controls {
+  margin-top: 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+}
+
 .progress {
   font-size: 12px;
   color: var(--faint);
-  margin-top: 40px;
 }
 
-.poster:focus-visible {
+.quiet {
+  background: none;
+  border: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--faint);
+  cursor: pointer;
+  padding: 6px;
+}
+
+.quiet:hover {
+  color: var(--ink);
+}
+
+.small {
+  margin-top: 6px;
+  align-self: flex-start;
+}
+
+.poster:focus-visible,
+.quiet:focus-visible {
   outline: 2px solid var(--ink);
   outline-offset: 4px;
 }
