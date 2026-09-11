@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: rankmymovies-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: TMDB_API_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: rankmymovies-db
+          property: connectionString
+
+databases:
+  - name: rankmymovies-db
+    plan: free
