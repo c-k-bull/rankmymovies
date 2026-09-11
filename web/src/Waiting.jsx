@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-const API = "http://127.0.0.1:8000";
+import { API } from "./api";
 
 export default function Waiting({ sid, onReady, onReset }) {
   const [status, setStatus] = useState({ state: "queued", done: 0, total: 0 });

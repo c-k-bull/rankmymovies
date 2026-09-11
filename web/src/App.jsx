@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import Results from "./Results";
 
-const API = "http://127.0.0.1:8000";
+import { API } from "./api";
 
 import Landing from "./Landing";
 import Waiting from "./Waiting";

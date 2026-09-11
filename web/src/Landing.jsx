@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-const API = "http://127.0.0.1:8000";
+import { API } from "./api";
 
 export default function Landing({ onSession }) {
   const [dragging, setDragging] = useState(false);

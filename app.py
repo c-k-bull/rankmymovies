@@ -1,12 +1,16 @@
+import os
 import re
 import shutil
+import tempfile
 import zipfile
+from pathlib import Path
 
 import pandas as pd
 from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 import storage
+from db import init as db_init
 from ingest import load_export, add_signal_flags, add_priors
 from enrich import enrich
 from pool import build_pool
@@ -17,9 +21,11 @@ from score import to_ten_point, perfect_candidates
 
 app = FastAPI()
 
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -33,45 +39,41 @@ SUBCATEGORIES = [
 ]
 
 
-def process_export(sid: str) -> None:
+@app.on_event("startup")
+def startup():
+    db_init()
+
+
+def process_export(sid: str, export_dir: str) -> None:
     try:
-        export_dir = storage.session_path(sid, "export")
         films = add_priors(add_signal_flags(load_export(export_dir), export_dir))
 
         storage.write_status(sid, "enriching", 0, len(films))
         enriched, failures = enrich(
             films,
-            on_progress=lambda done, total: storage.write_status(sid, "enriching", done, total),
+            on_progress=lambda done, total: storage.write_status(
+                sid, "enriching", done, total
+            ),
         )
 
         merged = films.merge(enriched, on="film_uri", how="left")
         merged = build_pool(merged)
-        merged.to_csv(storage.session_path(sid, "films.csv"), index=False)
+        storage.save_films(sid, merged)
 
         storage.write_status(sid, "ready", len(merged), len(merged))
     except Exception as e:
-        storage.write_status(sid, f"error: {e}")
+        import traceback
+        traceback.print_exc()
+        storage.write_status(sid, f"error: {type(e).__name__}: {e}"[:500])
+    finally:
+        shutil.rmtree(export_dir, ignore_errors=True)
 
 
-def load_session_films(sid: str) -> pd.DataFrame:
-    path = storage.session_path(sid, "films.csv")
-    if not path.exists():
+def get_films(sid: str) -> pd.DataFrame:
+    films = storage.load_films(sid)
+    if films.empty:
         raise HTTPException(409, "session not ready")
-    return pd.read_csv(path)
-
-
-def load_session_log(sid: str) -> pd.DataFrame:
-    path = storage.session_path(sid, "comparisons.csv")
-    if path.exists():
-        return pd.read_csv(path)
-    return pd.DataFrame(columns=["film_a", "film_b", "winner", "timestamp"])
-
-
-def load_exclusions(sid: str) -> set:
-    path = storage.session_path(sid, "exclusions.csv")
-    if path.exists():
-        return set(pd.read_csv(path)["film_uri"])
-    return set()
+    return films
 
 
 def film_payload(row: pd.Series) -> dict:
@@ -84,17 +86,29 @@ def film_payload(row: pd.Series) -> dict:
     }
 
 
+@app.get("/health")
+async def health():
+    return {"ok": True}
+
+
 @app.post("/upload")
 async def upload(file: UploadFile, background: BackgroundTasks):
     sid = storage.new_session()
-    zip_path = storage.session_path(sid, "export.zip")
+
+    work = Path(tempfile.mkdtemp(prefix=f"rmm-{sid}-"))
+    zip_path = work / "export.zip"
+    export_dir = work / "export"
 
     with open(zip_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    export_dir = storage.session_path(sid, "export")
-    with zipfile.ZipFile(zip_path) as z:
-        z.extractall(export_dir)
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            z.extractall(export_dir)
+    except zipfile.BadZipFile:
+        shutil.rmtree(work, ignore_errors=True)
+        storage.write_status(sid, "error: not a zip file")
+        raise HTTPException(400, "that file isn't a zip")
 
     profile = export_dir / "profile.csv"
     favorites = ""
@@ -105,7 +119,7 @@ async def upload(file: UploadFile, background: BackgroundTasks):
 
     zip_path.unlink()
     storage.write_status(sid, "queued")
-    background.add_task(process_export, sid)
+    background.add_task(process_export, sid, str(export_dir))
 
     return {"session_id": sid}
 
@@ -119,9 +133,9 @@ async def status(sid: str):
 
 @app.get("/pair/{sid}")
 async def get_pair(sid: str):
-    films = load_session_films(sid)
-    log = load_session_log(sid)
-    excluded = load_exclusions(sid)
+    films = get_films(sid)
+    log = storage.load_log(sid)
+    excluded = storage.load_exclusions(sid)
 
     pool = films[films["in_pool"] & ~films["film_uri"].isin(excluded)]
     seen = {frozenset((r["film_a"], r["film_b"])) for _, r in log.iterrows()}
@@ -145,36 +159,25 @@ async def post_comparison(sid: str, film_a: str = Body(...),
     if winner not in (film_a, film_b):
         raise HTTPException(400, "winner must be one of the two films")
 
-    path = storage.session_path(sid, "comparisons.csv")
-    row = pd.DataFrame([{
-        "film_a": film_a, "film_b": film_b, "winner": winner,
-        "timestamp": pd.Timestamp.now().isoformat(),
-    }])
-    row.to_csv(path, mode="a", header=not path.exists(), index=False)
-
-    return {"count": len(load_session_log(sid))}
+    storage.append_comparison(sid, film_a, film_b, winner)
+    return {"count": len(storage.load_log(sid))}
 
 
 @app.post("/exclude/{sid}")
 async def post_exclude(sid: str, film_uri: str = Body(..., embed=True)):
-    path = storage.session_path(sid, "exclusions.csv")
-    row = pd.DataFrame([{
-        "film_uri": film_uri,
-        "timestamp": pd.Timestamp.now().isoformat(),
-    }])
-    row.to_csv(path, mode="a", header=not path.exists(), index=False)
+    storage.append_exclusion(sid, film_uri)
     return {"excluded": film_uri}
 
 
 @app.get("/results/{sid}")
 async def get_results(sid: str):
-    films = load_session_films(sid)
-    log = load_session_log(sid)
+    films = get_films(sid)
+    log = storage.load_log(sid)
 
     if len(log) < 10:
         return {"ready": False, "count": len(log), "needed": 10 - len(log)}
 
-    excluded = load_exclusions(sid)
+    excluded = storage.load_exclusions(sid)
     pool = films[films["in_pool"] & ~films["film_uri"].isin(excluded)].copy()
 
     fit = fit_strengths(pool, log)
