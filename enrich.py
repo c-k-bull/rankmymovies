@@ -26,7 +26,7 @@ def save_cache(cache: dict[int, dict]) -> None:
     pd.DataFrame(list(cache.values())).to_csv(CACHE_PATH, index=False)
 
 
-def enrich(films: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def enrich(films: pd.DataFrame, on_progress=None) -> tuple[pd.DataFrame, pd.DataFrame]:
     cache = load_cache()
     rows, failures = [], []
 
@@ -48,8 +48,8 @@ def enrich(films: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
         rows.append({"film_uri": film["film_uri"], "match_tier": tier, **cache[tmdb_id]})
 
-        if (i + 1) % 50 == 0:
-            print(f"  {i + 1}/{len(films)}")
+        if (i + 1) % 10 == 0 and on_progress:
+            on_progress(i + 1, len(films))
 
     save_cache(cache)
     return pd.DataFrame(rows), pd.DataFrame(failures)

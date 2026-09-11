@@ -1,22 +1,19 @@
+import re
 import shutil
 import zipfile
-from pathlib import Path
 
 import pandas as pd
-from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 
 import storage
 from ingest import load_export, add_signal_flags, add_priors
 from enrich import enrich
 from pool import build_pool
-from fastapi import Body
 from compare import select_pair
-
 from model import fit_strengths
 from aggregate import aggregate, subcategory_confidence
 from score import to_ten_point, perfect_candidates
-
-from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
@@ -36,56 +33,24 @@ SUBCATEGORIES = [
 ]
 
 
-@app.get("/results/{sid}")
-async def get_results(sid: str):
-    films = load_session_films(sid)
-    log = load_session_log(sid)
+def process_export(sid: str) -> None:
+    try:
+        export_dir = storage.session_path(sid, "export")
+        films = add_priors(add_signal_flags(load_export(export_dir), export_dir))
 
-    if len(log) < 10:
-        return {"ready": False, "count": len(log), "needed": 10 - len(log)}
+        storage.write_status(sid, "enriching", 0, len(films))
+        enriched, failures = enrich(
+            films,
+            on_progress=lambda done, total: storage.write_status(sid, "enriching", done, total),
+        )
 
-    excluded = set()
-    ex_path = storage.session_path(sid, "exclusions.csv")
-    if ex_path.exists():
-        excluded = set(pd.read_csv(ex_path)["film_uri"])
+        merged = films.merge(enriched, on="film_uri", how="left")
+        merged = build_pool(merged)
+        merged.to_csv(storage.session_path(sid, "films.csv"), index=False)
 
-    pool = films[films["in_pool"] & ~films["film_uri"].isin(excluded)].copy()
-
-    fit = fit_strengths(pool, log)
-    ranked = pool.merge(fit, on="film_uri").sort_values("strength", ascending=False)
-    ranked = to_ten_point(ranked)
-
-    top = [
-        {**film_payload(r), "score": float(r["score_10"]),
-         "provisional": bool(r["provisional"]),
-         "n_comparisons": int(r["n_comparisons"])}
-        for _, r in ranked.head(25).iterrows()
-    ]
-
-    subcats = {}
-    for field, idf, minf in SUBCATEGORIES:
-        agg = aggregate(ranked, field, use_idf=idf, min_films=minf)
-        conf = subcategory_confidence(ranked, agg, field)
-        subcats[field] = {
-            "unlocked": conf["unlocked"],
-            "leaders": conf["leaders"],
-            "more_needed": conf["more_needed"],
-            "entries": [
-                {"name": r["key"], "score": float(r["score"]),
-                 "n_films": int(r["n_films"]), "top_film": r["top_film"]}
-                for _, r in agg.head(8).iterrows()
-            ] if conf["unlocked"] else [],
-        }
-
-    cands = perfect_candidates(ranked)
-
-    return {
-        "ready": True,
-        "count": len(log),
-        "top_films": top,
-        "subcategories": subcats,
-        "perfect_candidates": [film_payload(r) for _, r in cands.iterrows()],
-    }
+        storage.write_status(sid, "ready", len(merged), len(merged))
+    except Exception as e:
+        storage.write_status(sid, f"error: {e}")
 
 
 def load_session_films(sid: str) -> pd.DataFrame:
@@ -102,6 +67,13 @@ def load_session_log(sid: str) -> pd.DataFrame:
     return pd.DataFrame(columns=["film_a", "film_b", "winner", "timestamp"])
 
 
+def load_exclusions(sid: str) -> set:
+    path = storage.session_path(sid, "exclusions.csv")
+    if path.exists():
+        return set(pd.read_csv(path)["film_uri"])
+    return set()
+
+
 def film_payload(row: pd.Series) -> dict:
     poster = row.get("poster_path")
     return {
@@ -112,15 +84,44 @@ def film_payload(row: pd.Series) -> dict:
     }
 
 
+@app.post("/upload")
+async def upload(file: UploadFile, background: BackgroundTasks):
+    sid = storage.new_session()
+    zip_path = storage.session_path(sid, "export.zip")
+
+    with open(zip_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    export_dir = storage.session_path(sid, "export")
+    with zipfile.ZipFile(zip_path) as z:
+        z.extractall(export_dir)
+
+    profile = export_dir / "profile.csv"
+    favorites = ""
+    if profile.exists():
+        favorites = pd.read_csv(profile)["Favorite Films"].iloc[0]
+        profile.unlink()
+    (export_dir / "favorites.txt").write_text(str(favorites))
+
+    zip_path.unlink()
+    storage.write_status(sid, "queued")
+    background.add_task(process_export, sid)
+
+    return {"session_id": sid}
+
+
+@app.get("/status/{sid}")
+async def status(sid: str):
+    if not storage.exists(sid):
+        raise HTTPException(404, "unknown session")
+    return storage.read_status(sid)
+
+
 @app.get("/pair/{sid}")
 async def get_pair(sid: str):
     films = load_session_films(sid)
     log = load_session_log(sid)
-
-    excluded = set()
-    ex_path = storage.session_path(sid, "exclusions.csv")
-    if ex_path.exists():
-        excluded = set(pd.read_csv(ex_path)["film_uri"])
+    excluded = load_exclusions(sid)
 
     pool = films[films["in_pool"] & ~films["film_uri"].isin(excluded)]
     seen = {frozenset((r["film_a"], r["film_b"])) for _, r in log.iterrows()}
@@ -164,51 +165,64 @@ async def post_exclude(sid: str, film_uri: str = Body(..., embed=True)):
     row.to_csv(path, mode="a", header=not path.exists(), index=False)
     return {"excluded": film_uri}
 
-def process_export(sid: str) -> None:
-    try:
-        export_dir = storage.session_path(sid, "export")
-        films = add_priors(add_signal_flags(load_export(export_dir), export_dir))
 
-        storage.write_status(sid, "enriching", 0, len(films))
-        enriched, failures = enrich(films)
+@app.get("/results/{sid}")
+async def get_results(sid: str):
+    films = load_session_films(sid)
+    log = load_session_log(sid)
 
-        merged = films.merge(enriched, on="film_uri", how="left")
-        merged = build_pool(merged)
-        merged.to_csv(storage.session_path(sid, "films.csv"), index=False)
+    if len(log) < 10:
+        return {"ready": False, "count": len(log), "needed": 10 - len(log)}
 
-        storage.write_status(sid, "ready", len(merged), len(merged))
-    except Exception as e:
-        storage.write_status(sid, f"error: {e}")
+    excluded = load_exclusions(sid)
+    pool = films[films["in_pool"] & ~films["film_uri"].isin(excluded)].copy()
 
+    fit = fit_strengths(pool, log)
+    ranked = pool.merge(fit, on="film_uri").sort_values("strength", ascending=False)
+    ranked = to_ten_point(ranked)
 
-@app.post("/upload")
-async def upload(file: UploadFile, background: BackgroundTasks):
-    sid = storage.new_session()
-    zip_path = storage.session_path(sid, "export.zip")
+    top = [
+        {**film_payload(r), "score": float(r["score_10"]),
+         "provisional": bool(r["provisional"]),
+         "n_comparisons": int(r["n_comparisons"])}
+        for _, r in ranked.head(25).iterrows()
+    ]
 
-    with open(zip_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    subcats = {}
+    for field, idf, minf in SUBCATEGORIES:
+        agg = aggregate(ranked, field, use_idf=idf, min_films=minf)
+        conf = subcategory_confidence(ranked, agg, field)
 
-    export_dir = storage.session_path(sid, "export")
-    with zipfile.ZipFile(zip_path) as z:
-        z.extractall(export_dir)
+        entries = []
+        if conf["unlocked"]:
+            for _, r in agg.head(8).iterrows():
+                members = ranked[
+                    ranked[field].fillna("").str.contains(re.escape(r["key"]))
+                ]
+                entries.append({
+                    "name": r["key"],
+                    "score": float(r["score"]),
+                    "n_films": int(r["n_films"]),
+                    "films": [
+                        {**film_payload(m), "score": float(m["score_10"]),
+                         "n_comparisons": int(m["n_comparisons"])}
+                        for _, m in members.head(10).iterrows()
+                    ],
+                })
 
-    profile = export_dir / "profile.csv"
-    favorites = ""
-    if profile.exists():
-        favorites = pd.read_csv(profile)["Favorite Films"].iloc[0]
-        profile.unlink()
-    (export_dir / "favorites.txt").write_text(str(favorites))
+        subcats[field] = {
+            "unlocked": conf["unlocked"],
+            "leaders": conf["leaders"],
+            "more_needed": conf["more_needed"],
+            "entries": entries,
+        }
 
-    zip_path.unlink()
-    storage.write_status(sid, "queued")
-    background.add_task(process_export, sid)
+    cands = perfect_candidates(ranked)
 
-    return {"session_id": sid}
-
-
-@app.get("/status/{sid}")
-async def status(sid: str):
-    if not storage.exists(sid):
-        raise HTTPException(404, "unknown session")
-    return storage.read_status(sid)
+    return {
+        "ready": True,
+        "count": len(log),
+        "top_films": top,
+        "subcategories": subcats,
+        "perfect_candidates": [film_payload(r) for _, r in cands.iterrows()],
+    }

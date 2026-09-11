@@ -1,25 +1,34 @@
 import { useEffect, useState, useCallback } from "react";
+import Results from "./Results";
 
 const API = "http://127.0.0.1:8000";
-const SID = "1de750a3fe4b";
+
+import Landing from "./Landing";
+import Waiting from "./Waiting";
+
+const KEY = "rmm.session";
 
 export default function App() {
+  const [sid, setSid] = useState(() => localStorage.getItem(KEY));
+  const [ready, setReady] = useState(false);
   const [pair, setPair] = useState(null);
   const [next, setNext] = useState(null);
+  const [view, setView] = useState("compare");
   const [count, setCount] = useState(0);
 
   const fetchPair = useCallback(async () => {
-    const r = await fetch(`${API}/pair/${SID}`);
+    const r = await fetch(`${API}/pair/${sid}`);
     return r.json();
-  }, []);
+  }, [sid]);
 
   useEffect(() => {
+    if (!sid || !ready) return;
     fetchPair().then((first) => {
       setPair(first);
       setCount(first.count);
       fetchPair().then(setNext);
     });
-  }, [fetchPair]);
+  }, [fetchPair, sid, ready]);
 
   useEffect(() => {
     if (!next || next.done) return;
@@ -37,7 +46,7 @@ export default function App() {
   function choose(winner) {
     if (!pair || pair.done) return;
 
-    fetch(`${API}/comparison/${SID}`, {
+    fetch(`${API}/comparison/${sid}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -59,7 +68,7 @@ export default function App() {
   function exclude(film_uri) {
     if (!pair || pair.done) return;
 
-    fetch(`${API}/exclude/${SID}`, {
+    fetch(`${API}/exclude/${sid}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ film_uri }),
@@ -78,6 +87,22 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
+
+  if (view === "results") return <Results sid={sid} onBack={() => setView("compare")} />;
+
+    if (!sid) {
+    return <Landing onSession={(id) => { localStorage.setItem(KEY, id); setSid(id); }} />;
+  }
+
+  if (!ready) {
+    return (
+      <Waiting
+        sid={sid}
+        onReady={() => setReady(true)}
+        onReset={() => { localStorage.removeItem(KEY); setSid(null); }}
+      />
+    );
+  }
 
   if (!pair) return <div className="stage">Loading your films…</div>;
   if (pair.done) return <div className="stage">You've compared everything.</div>;
@@ -103,6 +128,7 @@ export default function App() {
 
       <div className="controls">
         <button className="quiet" onClick={skip}>Skip</button>
+        <button className="quiet" onClick={() => setView("results")}>See results</button>
         <span className="progress">{count} compared</span>
       </div>
     </div>
