@@ -111,6 +111,17 @@ async def upload(file: UploadFile, background: BackgroundTasks):
         storage.write_status(sid, "error: not a zip file")
         raise HTTPException(400, "that file isn't a zip")
 
+    if not (export_dir / "watched.csv").exists():
+        for d in export_dir.iterdir():
+            if d.is_dir() and (d / "watched.csv").exists():
+                export_dir = d
+                break
+
+    if not (export_dir / "watched.csv").exists():
+        shutil.rmtree(work, ignore_errors=True)
+        storage.write_status(sid, "error: no watched.csv — is this a Letterboxd export?")
+        raise HTTPException(400, "that doesn't look like a Letterboxd export")
+
     profile = export_dir / "profile.csv"
     favorites = ""
     if profile.exists():
